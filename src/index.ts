@@ -129,15 +129,13 @@ export type VerifyOptions = {
  */
 export function verifyEvent(options: VerifyOptions): CardanoEvent {
     const raw = rawBytes(options.payload);
-    const secrets = (Array.isArray(options.secret) ? options.secret : [options.secret]).filter(
-        (secret) => typeof secret === "string" && secret.length > 0
-    );
-    // A TypeError, not a SignatureError: this is a configuration bug on the
-    // receiving side, and should surface as one rather than as a forged request.
-    if (secrets.length === 0) {
-        throw new TypeError("verifyEvent: no webhook secret configured (is WEBHOOK_SECRET set?)");
-    }
+    const secrets = normalizeSecrets(options.secret);
     const tolerance = options.toleranceSeconds ?? 300;
+    // NaN compares false against everything, so `age > NaN` would silently
+    // switch replay protection off (e.g. `Number(process.env.UNSET)`).
+    if (typeof tolerance !== "number" || Number.isNaN(tolerance) || tolerance < 0) {
+        throw new TypeError(`verifyEvent: toleranceSeconds must be a non-negative number, got ${String(tolerance)}`);
+    }
 
     if (!options.header) throw new SignatureError("missing X-Cardano-Signature header");
 
@@ -165,6 +163,18 @@ export function verifyEvent(options: VerifyOptions): CardanoEvent {
     }
 
     return JSON.parse(raw.toString("utf8")) as CardanoEvent;
+}
+
+function normalizeSecrets(secret: string | string[]): string[] {
+    const secrets = (Array.isArray(secret) ? secret : [secret]).filter(
+        (value) => typeof value === "string" && value.length > 0
+    );
+    // A TypeError, not a SignatureError: this is a configuration bug on the
+    // receiving side, and should surface as one rather than as a forged request.
+    if (secrets.length === 0) {
+        throw new TypeError("verifyEvent: no webhook secret configured (is WEBHOOK_SECRET set?)");
+    }
+    return secrets;
 }
 
 function rawBytes(payload: unknown): Buffer {
@@ -306,24 +316,24 @@ export function expressWebhook(
     secret: string | string[],
     handler: (event: CardanoEvent) => void | Promise<void>
 ) {
+    // Fail at startup, not on every delivery: a missing secret would otherwise
+    // answer 500 to everything and leave the sender retrying for hours.
+    const secrets = normalizeSecrets(secret);
+
     return async function middleware(
         req: { body: unknown; headers: Record<string, unknown> },
         res: { status: (code: number) => { send: (body?: string) => void }; },
         next?: (error?: unknown) => void
     ): Promise<void> {
+        let event: CardanoEvent;
         try {
-            const event = verifyEvent({
+            event = verifyEvent({
                 // Passed through as is: a parsed object raises a TypeError
                 // naming the misconfiguration, instead of a misleading 400.
                 payload: req.body as string | Buffer,
                 header: String(req.headers[SIGNATURE_HEADER] ?? ""),
-                secret,
+                secret: secrets,
             });
-
-            await handler(event);
-            // Acknowledge fast. Anything slow belongs on a queue, because a
-            // timeout here counts as a failure and triggers a retry.
-            res.status(200).send();
         } catch (error) {
             if (error instanceof SignatureError) {
                 // The reason stays server-side: it would tell a forger how
@@ -331,6 +341,19 @@ export function expressWebhook(
                 res.status(400).send("invalid signature");
                 return;
             }
+            if (next) next(error);
+            else res.status(500).send();
+            return;
+        }
+
+        // Separate from verification, so a SignatureError thrown by the handler
+        // itself is a handler failure (retried), not a forged request.
+        try {
+            await handler(event);
+            // Acknowledge fast. Anything slow belongs on a queue, because a
+            // timeout here counts as a failure and triggers a retry.
+            res.status(200).send();
+        } catch (error) {
             // A non-2xx tells the sender to retry, which is what should happen
             // when a handler fails.
             if (next) next(error);
@@ -365,19 +388,44 @@ export class ApiError extends Error {
     }
 }
 
+function networkError(error: unknown): ApiError {
+    const reason = error instanceof Error && error.name === "TimeoutError" ? "timeout" : "request failed";
+    let message = error instanceof Error ? error.message : String(error);
+    // Node's fetch reports every failure as "fetch failed"; the cause has the
+    // useful part (ECONNREFUSED, ENOTFOUND, ...).
+    const cause = error instanceof Error ? (error as { cause?: unknown }).cause : undefined;
+    if (cause instanceof Error && cause.message) message += `: ${cause.message}`;
+    return new ApiError(0, reason, message);
+}
+
 /** Thin client for the endpoints a consumer needs at runtime. */
 export class LiqbeaconClient {
+    private readonly baseUrl: string;
+    private readonly timeoutMs: number;
+
     constructor(private readonly options: ClientOptions) {
         if (!options?.baseUrl) throw new TypeError("LiqbeaconClient: baseUrl is required");
         if (!options.apiKey) throw new TypeError("LiqbeaconClient: apiKey is required");
+        const timeoutMs = options.timeoutMs ?? 30_000;
+        // AbortSignal.timeout would otherwise throw on every request, and that
+        // would be reported as a network failure.
+        if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
+            throw new TypeError(`LiqbeaconClient: timeoutMs must be a positive integer, got ${String(timeoutMs)}`);
+        }
+        let end = options.baseUrl.length;
+        while (end > 0 && options.baseUrl[end - 1] === "/") end--;
+        this.baseUrl = options.baseUrl.slice(0, end);
+        this.timeoutMs = timeoutMs;
     }
 
     private async request<T>(path: string, init?: RequestInit): Promise<T> {
         let response: Response;
+        // Covers reading the body too, not just waiting for the headers.
+        const signal = AbortSignal.timeout(this.timeoutMs);
         try {
-            response = await fetch(`${this.options.baseUrl.replace(/\/+$/, "")}${path}`, {
+            response = await fetch(`${this.baseUrl}${path}`, {
                 ...init,
-                signal: AbortSignal.timeout(this.options.timeoutMs ?? 30_000),
+                signal,
                 headers: {
                     "Content-Type": "application/json",
                     Accept: "application/json",
@@ -388,15 +436,25 @@ export class LiqbeaconClient {
         } catch (error) {
             // DNS failure, refused connection, timeout: one error type for the
             // caller to handle, as in the Python client.
-            const reason = error instanceof Error && error.name === "TimeoutError" ? "timeout" : "request failed";
-            throw new ApiError(0, reason, error instanceof Error ? error.message : String(error));
+            throw networkError(error);
         }
 
-        if (!response.ok) {
-            const body = await response.text().catch(() => "");
-            throw new ApiError(response.status, response.statusText, body);
+        let text: string;
+        try {
+            text = await response.text();
+        } catch (error) {
+            // The connection dropped or timed out mid-body.
+            throw networkError(error);
         }
-        return (await response.json()) as T;
+        if (!response.ok) {
+            throw new ApiError(response.status, response.statusText, text);
+        }
+        try {
+            return JSON.parse(text) as T;
+        } catch {
+            // A proxy's HTML error page with a 200, for instance.
+            throw new ApiError(response.status, "invalid JSON response", text);
+        }
     }
 
     /**
