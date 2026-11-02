@@ -24,7 +24,7 @@ tarball so CI can install it too. To build one yourself: `npm run pack:offline`.
 
 ```ts
 import express from "express";
-import { verifyEvent } from "@liqbeacon/sdk";
+import { verifyEvent, SignatureError } from "@liqbeacon/sdk";
 
 const app = express();
 
@@ -40,7 +40,9 @@ app.post("/webhooks/cardano", express.raw({ type: "application/json" }), (req, r
     });
   } catch (error) {
     // A SignatureError: reject it, so it is never processed.
-    return res.sendStatus(400);
+    if (error instanceof SignatureError) return res.sendStatus(400);
+    // Anything else (a TypeError) is a misconfiguration on this side.
+    throw error;
   }
 
   console.log(event.type, event.data);
@@ -163,7 +165,7 @@ an API key (`sk_live_...`) and uses the built-in `fetch`.
 | `replay(sub, fromSeq, limit?)` | `POST /v1/subscriptions/{id}/replay` | `requeued`, `from_seq`, `message` |
 | `cursor(sub)` | `GET /v1/subscriptions/{id}/events/cursor` | The retained sequence range and `next_seq` |
 
-A non-2xx answer, a network failure or a timeout throws `ApiError`, with
+A non-2xx answer, a network failure, a timeout or a response that is not JSON throws `ApiError`, with
 `status` (0 when the API could not be reached) and the raw response `body`.
 
 ## Errors
@@ -171,7 +173,7 @@ A non-2xx answer, a network failure or a timeout throws `ApiError`, with
 | Error | When | What to do |
 | --- | --- | --- |
 | `SignatureError` | Bad or missing signature, stale timestamp | Answer 400. Never process the event. |
-| `TypeError` | `payload` is a parsed object, or no secret was given | Fix the route: `express.raw`, and set `WEBHOOK_SECRET`. |
+| `TypeError` | `payload` is a parsed object, no secret was given, or `toleranceSeconds` is not a non-negative number | Fix the route: `express.raw`, and set `WEBHOOK_SECRET`. `expressWebhook` throws this when mounted, so a missing secret stops the app at startup. |
 | `ApiError` | The API client got a non-2xx, or no answer | Retry later; `status` and `body` say why. |
 
 ## Delivery contract
