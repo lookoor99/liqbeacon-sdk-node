@@ -1,0 +1,22 @@
+{
+    "compilerOptions": {
+        "target": "ES2022",
+        // No DOM: fetch, Response and AbortSignal come from @types/node, so
+        // browser-only globals cannot creep into a Node package.
+        "lib": ["ES2022"],
+        // Matches the API: node16 is how Node resolves, and "node" is
+        // deprecated. package.json has no "type", so this stays CommonJS.
+        "module": "node16",
+        "moduleResolution": "node16",
+        "outDir": "dist",
+        "rootDir": "src",
+        "declaration": true,
+        "strict": true,
+        "esModuleInterop": true,
+        "skipLibCheck": true,
+        // Explicit: TypeScript 6 no longer loads every @types package by
+        // default, so editors on a newer TypeScript would not see Node.
+        "types": ["node"]
+    },
+    "include": ["src/**/*"]
+}

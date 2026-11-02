@@ -1,0 +1,53 @@
+{
+    "name": "@liqbeacon/sdk",
+    "version": "1.0.0",
+    "description": "Verify Liqbeacon webhooks and detect missed events.",
+    "license": "MIT",
+    "author": "lookoor99 <lookoor99@gmail.com>",
+    "homepage": "https://liqbeacon.com",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/lookoor99/liqbeacon-sdk-node.git"
+    },
+    "bugs": {
+        "url": "https://github.com/lookoor99/liqbeacon-sdk-node/issues"
+    },
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "default": "./dist/index.js"
+        },
+        "./package.json": "./package.json"
+    },
+    "files": [
+        "dist",
+        "README.md",
+        "LICENSE"
+    ],
+    "sideEffects": false,
+    "scripts": {
+        "build": "tsc",
+        "test": "npm run build && node --test test/",
+        "pack:offline": "npm run build && npm pack",
+        "prepublishOnly": "npm test"
+    },
+    "keywords": [
+        "cardano",
+        "webhook",
+        "utxo",
+        "blockchain",
+        "events"
+    ],
+    "engines": {
+        "node": ">=18"
+    },
+    "publishConfig": {
+        "access": "public"
+    },
+    "devDependencies": {
+        "@types/node": "^20.11.30",
+        "typescript": "^5.4.2"
+    }
+}
