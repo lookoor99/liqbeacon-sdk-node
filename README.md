@@ -190,3 +190,9 @@ A non-2xx answer, a network failure, a timeout or a response that is not JSON th
 
 Return 2xx quickly. Your response time is inside the delivery timeout, so slow
 work belongs on a queue.
+
+## Build pack
+
+```bash
+npm run pack:offline
+```
